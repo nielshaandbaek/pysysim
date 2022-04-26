@@ -92,15 +92,15 @@ def urgent_event():
     return simulator.urgent_event()
 
 @simulator_check
-def change(signal, value):
+def change(handle, value):
     """Change the value of the given signal to the given value for logging purposes.
 
-    :param signal: The signal whose value was changed.
-    :type signal: :class:`sysim.Signal`
+    :param handle: The signal whose value was changed.
+    :type handle: :class:`Variable`
     :param value: The new value of the signal.
     :type value: Any Python type
     """
-    simulator.change(signal, value)
+    simulator.change(handle, value)
 
 @simulator_check
 def anyof(events):

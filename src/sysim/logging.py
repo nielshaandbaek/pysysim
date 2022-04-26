@@ -5,9 +5,6 @@ a logging class supporting writing signal events to VCD files is provided.
 import math
 import vcd
 
-from sysim.core import (
-    now,
-)
 from sysim.signal import Signal
 from sysim.module import Module
 
@@ -38,36 +35,42 @@ class VcdLogger:
         """Initialize the logger with a given timescale. Causes the VCD file to
         be created."""
         self._vcd = vcd.VCDWriter(open(self._path, 'w'), timescale=timescale2str(timescale))
-        self.register(instance)
+        self.register_item(instance, instance.name.split('.')[-1])
 
-    def register(self, item):
+    def register_item(self, item, path):
         """Register a signal or an instance for logging. For signals,
         a specific scope and name will be used for logging. The type property
         describes how the variable will be formatted in the file."""
         if isinstance(item, Module):
             # Register all signals
             for signal in item.signals:
-                self.register(signal)
+                self.register_item(signal, path)
 
             # The register all sub-instances
             for instance in item.instances:
-                self.register(instance)
+                self.register_item(instance, path + "." + instance.name.split('.')[-1])
         elif isinstance(item, Signal) and item.type is not None:
             if item.scope not in self._vars:
                 self._vars[item.scope] = list()
 
             if item.name in self._vars[item.scope]:
-                raise KeyError(f"Variable in scope {item.scope} with name {item.name} has already been defined!")
-            item.register(self._vcd)
-            self._vars[item.scope].append(item.name)
-            #self.change(item, item.value)
+                item.register_alias(self, path)
+            else:
+                item.register(self)
+                self._vars[item.scope].append(item.name)
 
-    def change(self, signal, value):
+    def register(self, scope, name, type, size):
+        """Register a signal with a given scope, name, type and size."""
+        return self._vcd.register_var(scope, name, type, size)
+
+    def register_alias(self, handle, scope, name):
+        """Register another name for a signal with a given scope and name"""
+        return self._vcd.register_alias(scope, name, handle)
+
+    def change(self, handle, timestamp, value):
         """Change the value in the log file of the given signal. Will simply return
         in case the signal has not been registered."""
-        if signal.scope in self._vars and \
-           signal.name in self._vars[signal.scope]:
-            self._vars[signal.scope][signal.name].change(self._vcd, value)
+        self._vcd.change(handle, timestamp, value)
 
     def flush(self, timestamp=None):
         """Flush the already logged data to the VCD file."""

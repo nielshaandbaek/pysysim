@@ -23,11 +23,16 @@ class Simulator:
         """Returns the timescale configured for the simulation."""
         return self._timescale
 
-    def change(self, signal, value):
-      """If a logger is defined, change the value of a registered signal
-      to the new value."""
-      if self._logger is not None:
-          self._logger.change(signal, value)
+    def change(self, handle, value):
+        """If a logger is defined, change the value of a registered signal
+        to the new value."""
+        if self._logger is not None and handle is not None:
+            self._logger.change(handle, self.now(False), value)
+
+    def register(self, scope, name, type):
+        """Register a signal for logging and return the handle."""
+        if self._logger is not None:
+            return type.register(self._logger, scope, name)
 
     def event(self):
         """Returns a generic event for use by processes in Modules."""

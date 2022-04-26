@@ -5,74 +5,140 @@ Classes supporting converting values for logging purposes.
 import copy
 
 from re import S
-from collections import namedtuple
+from types import SimpleNamespace
+from abc import ABC
 from sysim.core import (
-  now
+  change
 )
 
-class TypeBase:
+class TypeBase(ABC):
     """Base class for providing information to the logger about how to format
     variables in the VCD file."""
-    def __init__(self, log_type, log_size):
-        self._logger = None
-        self._log_handle = None
+    def __init__(self, log_type = None, log_size = None):
         self._log_type = log_type
         self._log_size = log_size
+        super().__init__()
+
+    @property
+    def default(self):
+        return 0
 
     def conv(self, value):
         return value
 
-    def register(self, logger, scope, name):
-        self._logger = logger
-        self._log_handle = logger.register_var(scope, name, self._log_type, self._log_size)
+    def register(self, logger, scope, name, handle=None):
+        if self._log_type is not None:
+            if handle is not None:
+                handle = logger.register_alias(handle, scope, name)
+            else:
+                handle = logger.register(scope, name, self._log_type, self._log_size)
 
-    def log(self, value):
-        if self._logger is not None and value is not None:
-            self._logger.change(self._log_handle, now(False), value)
+        return handle
+
+    def log(self, value, handle):
+        change(handle, self.conv(value))
 
     def __call__(self, value):
-        return value
+        return self.conv(value)
 
-class Struct:
+class Struct(TypeBase):
     """Base class for composite type"""
     def __init__(self, **kwargs):
         self._entries = dict()
-        self._log_handles = dict()
-        for key, type in kwargs.items():
-            self._entries[key] = copy.copy(type)
+        self._entries.update(kwargs)
+        super().__init__()
+
+    def __contains__(self, key):
+        return key in self._entries
 
     @property
-    def entries(self):
-        return self._entries
+    def fields(self):
+        return self._entries.keys()
 
-    def register(self, logger, scope, name):
-        self._logger = logger
+    def register(self, logger, scope, name, handles=None):
+        if handles is None:
+          handles = dict()
+
         for key, type in self._entries.items():
-            self._log_handles[key] = logger.register_var(f"{scope}.{name}", key, type._log_type, type._log_size)
+            if key in handles:
+                logger.register_alias(handles[key], f"{scope}.{name}", key)
+            elif not key.startswith('_'):
+                handles[key] = logger.register(f"{scope}.{name}", key, type._log_type, type._log_size)
 
-    def log(self, value):
-        for key in self._entries.keys():
+        return handles
+
+    def log(self, value, handles):
+        if value is None:
+            return
+
+        for i, key in enumerate(self._entries.keys()):
             try:
-                self._logger.change(self._log_handles[key], now(False), getattr(value, key))
-            except AttributeError:
-                if isinstance(value, dict):
-                    self._logger.change(self._log_handles[key], now(False), value[key])
+                key_value = None
+
+                if key.startswith('_'):
+                    continue
+                elif hasattr(value, key):
+                    key_value = getattr(value, key)
+                elif isinstance(value, dict):
+                    key_value = value[key]
+                elif isinstance(value, list):
+                    key_value = value[i]
                 else:
-                    self._logger.change(self._log_handles[key], now(False), value)
+                    key_value = value
+
+                if key_value is not None:
+                    change(handles[key], self._entries[key](key_value))
+
+            except ValueError as e:
+                print(f"Unable to assign element {key} with value {value} to type {type(self._entries[key]).__name__}")
+
+    @property
+    def default(self):
+        return SimpleNamespace(**{key: value.default for key, value in self._entries.items()})
 
     def conv(self, value):
+        conv_value = self.default
         if isinstance(value, dict):
-            return namedtuple("StructConv", value.keys())(**value)
+            conv_value.update(value)
+        elif isinstance(value, list):
+            keys = self._entries.keys()
+            for i, elem in enumerate(value):
+                if i < len(keys):
+                    conv_value[keys[i]] = elem
         else:
-            return value
+            conv_value = value
+
+        return conv_value
 
     def __call__(self, **kwargs):
-        return namedtuple("StructValue", kwargs.keys())(**kwargs)
+        conv_value = self.default
+        for key, value in kwargs.items():
+            setattr(conv_value, key, value)
+        return conv_value
+
+class Simple(TypeBase):
+    """Singleton type for formatting e.g. single bit and integer signals."""
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+class Bit(Simple):
+    """Type for formatting a signal as a bit labelled as 'wire' in a VCD file."""
+    def __init__(self):
+        super().__init__('wire', 1)
 
 class BitVector(TypeBase):
     """Type for formatting a signal as a bit vector with a specific size and labelled as 'wire' in a VCD file."""
     def __init__(self, size):
         super().__init__('wire', size)
+
+class Reg(Simple):
+    """Type for formatting a signal as a bit labelled as 'reg' in a VCD file."""
+    def __init__(self):
+        super().__init__('reg', 1)
 
 class RegVector(TypeBase):
     """Type for formatting a signal as a bit vector with a specific size and labelled as 'reg' in a VCD file."""
@@ -83,14 +149,32 @@ class String(TypeBase):
     def __init__(self, size):
         super().__init__('string', size)
 
-Bit  = TypeBase('wire', 1)
-"""Short-hand type for a single bit 'wire'."""
+    @property
+    def default(self):
+        return ''
 
-Reg  = TypeBase('reg', 1)
-"""Short-hand type for a single bit 'reg'."""
+class Int(Simple):
+    """Type for formatting a signal as a 64-bit integer value labelled as 'wire' in a VCD file."""
+    def __init__(self):
+        super().__init__('integer')
 
-Int  = TypeBase('integer', None)
-"""Short-hand type for a 64-bit integer labelled as 'wire'."""
+class Real(Simple):
+    """Type for formatting a signal as a 64-bit floating point value labelled as 'wire' in a VCD file."""
+    def __init__(self):
+        super().__init__('real')
 
-Real = TypeBase('real', None)
-"""Short-hand type for a 64-bit floating point value labelled as 'wire'."""
+class Event(Simple):
+    """Type for formatting a signal as an 'event' in a VCD file."""
+    def __init__(self):
+        super().__init__('event')
+
+    # Events cannot actually log anything
+    def log(self, value, handle):
+        change(handle, 1)
+
+    def conv(self, value):
+        return 1
+
+    @property
+    def default(self):
+        return None

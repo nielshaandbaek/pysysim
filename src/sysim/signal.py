@@ -6,7 +6,7 @@ import simpy
 import copy
 
 from sysim.core import (
-    urgent_event, wait, now, schedule, change
+    urgent_event, wait, now, schedule,
 )
 from sysim.types import (
   Struct
@@ -19,6 +19,22 @@ class PortDirection(Enum):
     INPUT = 'input'
     OUTPUT = 'output'
     INOUT = 'inout'
+
+class SubSignal:
+    """Class representing a signal within a composite type."""
+    def __init__(self, parent, name):
+        self._parent = parent
+        self._name = name
+
+    def __ilshift__(self, other):
+        """Remap the <<= operator to assignment."""
+        self.assign(other)
+        return self
+
+    def assign(self, other, delay=None):
+        next_value = self._parent.next_value
+        setattr(next_value, self._name, other)
+        self._parent.assign(next_value, delay)
 
 class Signal:
     """Class representing a loggable signal. A signal can be assigned with or
@@ -45,18 +61,26 @@ class Signal:
         self._falling_edge = None
         self._event = None
         # Information for logger
-        self._signal_type = copy.copy(signal_type)
+        self._signal_type = signal_type
+        self._log_handles = None
         # Set when we are updating
         self._action = None
+        # Special handling of Struct types
+        if isinstance(signal_type, Struct):
+            for field in signal_type.fields:
+                setattr(self, field, SubSignal(self, field))
 
-    def __call__(self):
-        return self._value
+    def __call__(self, value=None):
+        if value is None:
+            return self._value
+        else:
+            self.assign(value)
 
     def _update_log(self, force=False):
         """Update the log in case our value has changed."""
         if self._value is not None and (force or (self._last_value != self._value)):
             try:
-                self._signal_type.log(self._value)
+                self._signal_type.log(self._value, self._log_handles)
             except ValueError:
                 print(f"Unable to assign {self._value} to {self.scope}.{self.name} of type {type(self._signal_type).__name__}")
 
@@ -86,9 +110,7 @@ class Signal:
         value has been assigned."""
         if self._value != self._next_value:
             self._last_value_change = now()
-        self._last_value = self._value
-        self._value = self._next_value
-        self._next_value = None
+        self._last_value, self._value, self._next_value = self._value, self._next_value, None
 
     def _update_internals(self, source):
         """Update all the internals based on a given source, which is also assumed
@@ -105,7 +127,7 @@ class Signal:
             if source is None or connection != source:
                 connection._update_internals(source)
 
-    def _update(self, delay=0, source=None):
+    def _update(self, delay=None, source=None):
         """Update the state of the signal after a certain delay. Optionally, the
         source of the update, in case it is another signal, can be indicated."""
         while True:
@@ -142,19 +164,21 @@ class Signal:
             if sink != source:
                 sink._update_next_value(value, self)
 
-    def propagate_initial_value(self):  
+    def propagate_initial_value(self):
         """Propagate initial value to self and all connected signals."""
         if self._initial_value is not None:
             self._update_last_value(self._initial_value, self)
 
     def log_initial_value(self):
         """Update log file with an initial value."""
-        self._signal_type.log(self._value)
+        self._signal_type.log(self._value, self._log_handles)
 
     def initialize(self, path):
         """Initialize the state of the signal and optionally register it with a logger."""
-        self._name = path.split(".")[-1]
-        self._scope = ".".join(path.split(".")[:-1])
+        if self._name is None:
+            self._name = path.split(".")[-1]
+        if self._scope is None:
+            self._scope = ".".join(path.split(".")[:-1])
 
     def disconnect(self, signal):
         """Remove a signal from the connection list of this signal or port."""
@@ -185,7 +209,7 @@ class Signal:
 
         return self
 
-    def assign(self, value, delay=0):
+    def assign(self, value, delay=None):
         """Assign a new value to the signal after an optional delay in units
         of seconds."""
         self._update_next_value(value, self)
@@ -194,18 +218,21 @@ class Signal:
         else:
             self._action = schedule(self._update(delay, self))
 
+    @property
     def rising_edge(self):
         """Create an event that is triggered by a rising edge on this signal."""
         if self._rising_edge is None:
             self._rising_edge = urgent_event()
         return self._rising_edge
 
+    @property
     def falling_edge(self):
         """Create an event that is triggered by a falling edge on this signal."""
         if self._falling_edge is None:
             self._falling_edge = urgent_event()
         return self._falling_edge
 
+    @property
     def event(self):
         """Create an event that is triggered by any change on this signal."""
         if self._event is None:
@@ -219,7 +246,11 @@ class Signal:
 
     def register(self, logger):
         """Register signal for logging."""
-        self._signal_type.register(logger, self.scope, self.name)
+        self._log_handles = self._signal_type.register(logger, self.scope, self.name)
+
+    def register_alias(self, logger, scope):
+        """Register signal as alias for logging."""
+        self._signal_type.register(logger, scope, self.name, self._log_handles)
 
     @property
     def name(self):
@@ -245,6 +276,14 @@ class Signal:
     def last_value(self):
         """Return the value of the signal prior to the last change."""
         return self._last_value
+
+    @property
+    def next_value(self):
+        """Return the value of the signal scheduled for the next update."""
+        if self._next_value is None:
+            return copy.copy(self._value)
+        else:
+            return self._next_value
 
     @property
     def last_event(self):
